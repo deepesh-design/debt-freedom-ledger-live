@@ -1,6 +1,6 @@
 {
-  "name": "Debt Freedom Ledger",
-  "short_name": "DebtLedger",
+  "name": "DebtZero",
+  "short_name": "DebtZero",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
