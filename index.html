@@ -369,6 +369,7 @@
     </div>
     <div class="mini-track"><div class="mini-fill" id="emergencyFill" style="width:0%"></div></div>
     <div class="mini-caption"><span id="emergencyPct">0%</span><span id="emergencyEta">—</span></div>
+    <div class="log-caption" id="emergencyScheduleNote" style="display:none"></div>
     <div class="log-block"><div class="log-block-label">Months to target</div><div id="calEmergency"></div></div>
   </div>
 
@@ -392,6 +393,7 @@
     </div>
     <div class="mini-track"><div class="mini-fill" id="japanFill" style="width:0%"></div></div>
     <div class="mini-caption"><span id="japanPct">0%</span></div>
+    <div class="log-caption" id="japanScheduleNote" style="display:none"></div>
     <div class="log-block"><div class="log-block-label">Months to target</div><div id="calJapan"></div></div>
   </div>
 
@@ -570,6 +572,33 @@ function simulateDebt(principal, ratePct, emi, extra){
     months++;
   }
   return {months, warn};
+}
+/* Same as monthsToGoal, but the monthly contribution steps up by `boost` starting at `boostFromMonth` — used to preview a scheduled redirect landing partway through. */
+function monthsToGoalWithBoost(current, target, monthlyBase, boost, boostFromMonth){
+  if(target <= 0) return null;
+  if(current >= target) return 0;
+  let bal = current, months = 0;
+  while(bal < target && months < 1200){
+    const contrib = months >= boostFromMonth ? monthlyBase+boost : monthlyBase;
+    if(contrib <= 0) return Infinity;
+    bal += contrib;
+    months++;
+  }
+  return months >= 1200 ? Infinity : months;
+}
+/* Same as simulateDebt, but extra payment steps up by `boost` starting at `boostFromMonth`. */
+function simulateDebtWithBoost(principal, ratePct, emi, extra, boost, boostFromMonth){
+  const r = (ratePct||0)/1200;
+  let balance = principal, months = 0;
+  while(balance > 1 && months < 1200){
+    const curExtra = months >= boostFromMonth ? extra+boost : extra;
+    const interest = balance*r;
+    const reduction = (emi - interest) + curExtra;
+    if(reduction <= 0) break;
+    balance = Math.max(0, balance - Math.min(reduction, balance));
+    months++;
+  }
+  return months >= 1200 ? Infinity : months;
 }
 /* Replays actual logged payments (which can be more or less than the plan) forward from the starting balance, so projections reflect real history, not just the plan. */
 function actualDebtBalance(state){
@@ -874,6 +903,7 @@ function buildMonthCalendar(container, opts){
         if(cb.checked){ state[opts.logsKey].push({month, amount: targetAmt+extraVal, loggedAt: Date.now()}); }
         await opts.save(state);
         opts.onChange && opts.onChange();
+        await applyScheduledRedirects();
         renderDashboard();
         render();
       });
@@ -889,6 +919,7 @@ function buildMonthCalendar(container, opts){
         state[opts.logsKey].push({month, amount: targetAmt+extraVal, loggedAt: Date.now()});
         await opts.save(state);
         opts.onChange && opts.onChange();
+        await applyScheduledRedirects();
         renderDashboard();
         render();
       });
@@ -1007,7 +1038,7 @@ function renderDebt(){
 
 /* ---------- Emergency fund ---------- */
 async function initEmergency(){
-  emergencyState = await loadJSON('emergency-v2', {current:0, target:0, monthly:0, logs:[]});
+  emergencyState = await loadJSON('emergency-v2', {current:0, target:0, monthly:0, logs:[], scheduledRedirect:null});
   document.getElementById('emergencyCurrent').value = emergencyState.current || '';
   document.getElementById('emergencyTarget').value = emergencyState.target || '';
   document.getElementById('emergencyMonthly').value = emergencyState.monthly || '';
@@ -1033,6 +1064,7 @@ async function initEmergency(){
     emergencyState.target = +document.getElementById('emergencyTarget').value || 0;
     emergencyState.monthly = newMonthly;
     await saveJSON('emergency-v2', emergencyState);
+    await applyScheduledRedirects();
     renderEmergency(); calRenderEmergency(); checkEmergencyDirty();
     flashNote(document.getElementById('emergencyNote'), 'Updated.');
   });
@@ -1045,12 +1077,13 @@ function renderEmergency(){
   const goal = monthsToGoal(total, emergencyState.target, emergencyState.monthly);
   document.getElementById('emergencyEta').textContent = emergencyState.target ? ('reach by ' + addMonthsLabel(goal)) : 'set a target above';
   document.getElementById('emergencyRedirectBtn').style.display = emergencyState.monthly>0 ? '' : 'none';
+  renderScheduleNote('emergencyScheduleNote', emergencyState.scheduledRedirect);
   renderDashboard();
 }
 
 /* ---------- Japan trip ---------- */
 async function initJapan(){
-  japanState = await loadJSON('japan-v2', {target:0, date:'', saved:0, monthly:0, logs:[]});
+  japanState = await loadJSON('japan-v2', {target:0, date:'', saved:0, monthly:0, logs:[], scheduledRedirect:null});
   document.getElementById('japanTarget').value = japanState.target || '';
   document.getElementById('japanDate').value = japanState.date || '';
   document.getElementById('japanSaved').value = japanState.saved || '';
@@ -1078,6 +1111,7 @@ async function initJapan(){
     japanState.saved = +document.getElementById('japanSaved').value || 0;
     japanState.monthly = newMonthly;
     await saveJSON('japan-v2', japanState);
+    await applyScheduledRedirects();
     renderJapan(); calRenderJapan(); checkJapanDirty();
     flashNote(document.getElementById('japanNote'), 'Updated.');
   });
@@ -1088,6 +1122,7 @@ function renderJapan(){
   document.getElementById('japanFill').style.width = pct + '%';
   document.getElementById('japanPct').textContent = Math.round(pct) + '% of ' + money(japanState.target);
   document.getElementById('japanRedirectBtn').style.display = japanState.monthly>0 ? '' : 'none';
+  renderScheduleNote('japanScheduleNote', japanState.scheduledRedirect);
 
   if(!japanState.target){
     document.getElementById('japanRequired').textContent = '—';
@@ -1162,6 +1197,7 @@ function renderTargetSections(){
       '</div>'+
       '<div class="mini-track"><div class="mini-fill" style="width:'+pct+'%"></div></div>'+
       '<div class="mini-caption"><span>'+Math.round(pct)+'% of '+money(t.target)+'</span><span>'+(t.target?('reach by '+addMonthsLabel(goal)):'set a target above')+'</span></div>'+
+      (t.scheduledRedirect ? '<div class="log-caption">'+scheduleNoteText(t.scheduledRedirect)+'</div>' : '')+
       '<div class="log-block"><div class="log-block-label">Months to target</div><div class="target-cal"></div></div>';
     container.appendChild(section);
     const calContainer = section.querySelector('.target-cal');
@@ -1215,6 +1251,7 @@ function openTargetEditModal(id){
     t.saved = +document.getElementById('tgtSaved').value || 0;
     t.monthly = newMonthly;
     await saveJSON('targets-v1', targetsState);
+    await applyScheduledRedirects();
     renderTargetDashCards(); renderTargetSections(); renderDashboard();
     checkDirty();
     flashNote(document.getElementById('tgtNote'), 'Updated.');
@@ -1265,16 +1302,22 @@ function openAddTargetModal(){
   });
 }
 
-/* ---------- Redirect: move a monthly commitment from one fund to another, user-chosen amount + destination ---------- */
+/* ---------- Redirect: schedule a monthly commitment to move to another fund once the source hits its target ---------- */
 function fundEntry(key){
   if(key === 'emergency') return {
-    key, label: 'Emergency fund', getMonthly: () => emergencyState.monthly||0,
-    setMonthly: (v) => { emergencyState.monthly = v; }, persist: () => saveJSON('emergency-v2', emergencyState),
+    key, label: 'Emergency fund',
+    getMonthly: () => emergencyState.monthly||0, setMonthly: (v) => { emergencyState.monthly = v; },
+    getTotal: () => emergencyState.current + logsSum(emergencyState.logs), getTarget: () => emergencyState.target||0,
+    getScheduledRedirect: () => emergencyState.scheduledRedirect||null, setScheduledRedirect: (v) => { emergencyState.scheduledRedirect = v; },
+    persist: () => saveJSON('emergency-v2', emergencyState),
     afterSave: () => { renderEmergency(); calRenderEmergency && calRenderEmergency(); }
   };
   if(key === 'japan') return {
-    key, label: 'Japan trip fund', getMonthly: () => japanState.monthly||0,
-    setMonthly: (v) => { japanState.monthly = v; }, persist: () => saveJSON('japan-v2', japanState),
+    key, label: 'Japan trip fund',
+    getMonthly: () => japanState.monthly||0, setMonthly: (v) => { japanState.monthly = v; },
+    getTotal: () => japanState.saved + logsSum(japanState.logs), getTarget: () => japanState.target||0,
+    getScheduledRedirect: () => japanState.scheduledRedirect||null, setScheduledRedirect: (v) => { japanState.scheduledRedirect = v; },
+    persist: () => saveJSON('japan-v2', japanState),
     afterSave: () => { renderJapan(); calRenderJapan && calRenderJapan(); }
   };
   if(key === 'debt') return {
@@ -1287,16 +1330,67 @@ function fundEntry(key){
     const t = (targetsState||[]).find(x=>x.id===id);
     if(!t) return null;
     return {
-      key, label: t.name, getMonthly: () => t.monthly||0,
-      setMonthly: (v) => { t.monthly = v; }, persist: () => saveJSON('targets-v1', targetsState),
+      key, label: t.name,
+      getMonthly: () => t.monthly||0, setMonthly: (v) => { t.monthly = v; },
+      getTotal: () => (t.saved||0)+logsSum(t.logs), getTarget: () => t.target||0,
+      getScheduledRedirect: () => t.scheduledRedirect||null, setScheduledRedirect: (v) => { t.scheduledRedirect = v; },
+      persist: () => saveJSON('targets-v1', targetsState),
       afterSave: () => { renderTargetDashCards(); renderTargetSections(); }
     };
   }
   return null;
 }
+function redirectSourceKeys(){
+  return ['emergency','japan', ...(targetsState||[]).map(t=>'target:'+t.id)];
+}
 function redirectDestinationKeys(excludeKey){
   const keys = ['emergency','japan','debt', ...(targetsState||[]).map(t=>'target:'+t.id)];
   return keys.filter(k => k !== excludeKey);
+}
+function scheduleNoteText(sched){
+  if(!sched) return '';
+  const dest = fundEntry(sched.destKey);
+  return 'Scheduled: ' + money(sched.amount) + '/mo → ' + (dest ? escapeHtml(dest.label) : '—') + ' once target is reached.';
+}
+function renderScheduleNote(elId, sched){
+  const el = document.getElementById(elId);
+  if(!el) return;
+  const text = scheduleNoteText(sched);
+  el.textContent = text;
+  el.style.display = text ? '' : 'none';
+}
+/* Projected months for a fund (or debt payoff) if its monthly/extra amount steps up by `boost` starting month `boostFromMonth`. */
+function fundProjectionMonths(key, boost, boostFromMonth){
+  if(key === 'debt'){
+    if(!debtState || !debtState.principal) return null;
+    return simulateDebtWithBoost(actualDebtBalance(debtState), debtState.ratePct, debtState.emi, debtState.extra||0, boost, boostFromMonth);
+  }
+  const f = fundEntry(key);
+  if(!f || !f.getTarget || !f.getTarget()) return null;
+  return monthsToGoalWithBoost(f.getTotal(), f.getTarget(), f.getMonthly(), boost, boostFromMonth);
+}
+/* Checked after every save that could move a fund's total: applies any scheduled redirect whose source has now reached its target. */
+async function applyScheduledRedirects(){
+  for(const key of redirectSourceKeys()){
+    const f = fundEntry(key);
+    if(!f || !f.getScheduledRedirect) continue;
+    const sched = f.getScheduledRedirect();
+    if(!sched) continue;
+    const target = f.getTarget();
+    if(target > 0 && f.getTotal() >= target){
+      const dest = fundEntry(sched.destKey);
+      const amt = Math.min(sched.amount, f.getMonthly());
+      if(dest && amt > 0){
+        f.setMonthly(f.getMonthly() - amt);
+        dest.setMonthly(dest.getMonthly() + amt);
+        await dest.persist();
+        dest.afterSave();
+      }
+      f.setScheduledRedirect(null);
+      await f.persist();
+      f.afterSave();
+    }
+  }
 }
 function openRedirectModal(sourceKey){
   const source = fundEntry(sourceKey);
@@ -1304,36 +1398,112 @@ function openRedirectModal(sourceKey){
   const destKeys = redirectDestinationKeys(sourceKey);
   if(!destKeys.length) return;
   const content = document.getElementById('modalContent');
+  const totalNow = source.getTotal();
+  const targetVal = source.getTarget();
+
+  if(targetVal > 0 && totalNow >= targetVal){
+    /* Already reached — move the amount right now, nothing to schedule. */
+    content.innerHTML =
+      '<div class="modal-head"><p class="line-title">Redirect from '+escapeHtml(source.label)+'</p></div>'+
+      '<p class="line-desc" style="margin-bottom:16px;">Target already reached. Currently '+money(source.getMonthly())+'/mo — choose how much to move and where.</p>'+
+      '<div class="row">'+
+        '<div class="field-group"><label class="field">Amount / month</label><input type="number" id="redirectAmount" value="'+source.getMonthly()+'" step="500"></div>'+
+        '<div class="field-group"><label class="field">Move to</label><select id="redirectDest">'+
+          destKeys.map(k => '<option value="'+k+'">'+escapeHtml(fundEntry(k).label)+'</option>').join('')+
+        '</select></div>'+
+      '</div>'+
+      '<div class="row"><button id="redirectConfirmBtn" style="flex:1 1 100%;">Redirect now</button></div>'+
+      '<div class="save-note" id="redirectNote"></div>';
+    document.getElementById('modalOverlay').style.display = 'flex';
+    enhanceNumberInputs(content);
+    document.getElementById('redirectConfirmBtn').addEventListener('click', async () => {
+      const note = document.getElementById('redirectNote');
+      const amount = +document.getElementById('redirectAmount').value || 0;
+      if(amount <= 0){ flashNote(note, 'Enter an amount.', true); return; }
+      if(amount > source.getMonthly()){ flashNote(note, 'Can\'t redirect more than the current ' + money(source.getMonthly()) + '/mo.', true); return; }
+      const dest = fundEntry(document.getElementById('redirectDest').value);
+      if(!dest) return;
+      source.setMonthly(source.getMonthly() - amount);
+      dest.setMonthly(dest.getMonthly() + amount);
+      await source.persist();
+      await dest.persist();
+      source.afterSave();
+      dest.afterSave();
+      renderDashboard();
+      document.getElementById('modalOverlay').style.display = 'none';
+      content.innerHTML = '';
+    });
+    return;
+  }
+
+  if(!targetVal){
+    content.innerHTML =
+      '<div class="modal-head"><p class="line-title">Redirect from '+escapeHtml(source.label)+'</p></div>'+
+      '<p class="line-desc">Set a target for '+escapeHtml(source.label)+' first — a redirect triggers once a target is reached.</p>';
+    document.getElementById('modalOverlay').style.display = 'flex';
+    return;
+  }
+
+  /* Not reached yet — schedule it, and preview the effect on the destination's timeline. */
+  const sourceMonths = monthsToGoal(totalNow, targetVal, source.getMonthly());
+  const existing = source.getScheduledRedirect();
+
+  function renderPreview(){
+    const preview = document.getElementById('redirectPreview');
+    const amount = +document.getElementById('redirectAmount').value || 0;
+    const destKey = document.getElementById('redirectDest').value;
+    const dest = fundEntry(destKey);
+    if(!dest || amount <= 0 || !isFinite(sourceMonths)){ preview.innerHTML = ''; return; }
+    const before = fundProjectionMonths(destKey, 0, 0);
+    const after = fundProjectionMonths(destKey, amount, sourceMonths);
+    const label = (n) => n===null ? '—' : (isFinite(n) ? addMonthsLabel(n) : 'never at this pace');
+    const savedMonths = (isFinite(before) && isFinite(after)) ? before-after : null;
+    preview.innerHTML =
+      '<div class="log-caption">'+escapeHtml(source.label)+' is projected to reach its target by '+addMonthsLabel(sourceMonths)+'.</div>'+
+      '<div class="log-row"><span>'+escapeHtml(dest.label)+' — without this</span><span class="log-amt">'+label(before)+'</span></div>'+
+      '<div class="log-row"><span>'+escapeHtml(dest.label)+' — with this redirect</span><span class="log-amt">'+label(after)+'</span></div>'+
+      (savedMonths>0 ? '<div class="log-caption" style="color:var(--green)">'+savedMonths+' months earlier.</div>' : '');
+  }
+
   content.innerHTML =
-    '<div class="modal-head"><p class="line-title">Redirect from '+escapeHtml(source.label)+'</p></div>'+
-    '<p class="line-desc" style="margin-bottom:16px;">Currently '+money(source.getMonthly())+'/mo. Choose how much to move and where.</p>'+
+    '<div class="modal-head"><p class="line-title">Schedule redirect from '+escapeHtml(source.label)+'</p></div>'+
+    '<p class="line-desc" style="margin-bottom:16px;">Not reached yet — projected by '+addMonthsLabel(sourceMonths)+'. Set this up now; it moves automatically once the target is hit.</p>'+
     '<div class="row">'+
-      '<div class="field-group"><label class="field">Amount / month</label><input type="number" id="redirectAmount" value="'+source.getMonthly()+'" step="500"></div>'+
+      '<div class="field-group"><label class="field">Amount / month</label><input type="number" id="redirectAmount" value="'+(existing?existing.amount:source.getMonthly())+'" step="500"></div>'+
       '<div class="field-group"><label class="field">Move to</label><select id="redirectDest">'+
-        destKeys.map(k => '<option value="'+k+'">'+escapeHtml(fundEntry(k).label)+'</option>').join('')+
+        destKeys.map(k => '<option value="'+k+'" '+(existing && existing.destKey===k ? 'selected' : '')+'>'+escapeHtml(fundEntry(k).label)+'</option>').join('')+
       '</select></div>'+
     '</div>'+
-    '<div class="row"><button id="redirectConfirmBtn" style="flex:1 1 100%;">Redirect</button></div>'+
+    '<div id="redirectPreview" style="margin:14px 0;"></div>'+
+    '<div class="row"><button id="redirectConfirmBtn" style="flex:1 1 100%;">'+(existing?'Update schedule':'Schedule redirect')+'</button></div>'+
+    (existing ? '<button type="button" class="section-delete-btn" id="redirectCancelBtn">Cancel scheduled redirect</button>' : '')+
     '<div class="save-note" id="redirectNote"></div>';
   document.getElementById('modalOverlay').style.display = 'flex';
   enhanceNumberInputs(content);
+  renderPreview();
+  document.getElementById('redirectAmount').addEventListener('input', renderPreview);
+  document.getElementById('redirectDest').addEventListener('change', renderPreview);
   document.getElementById('redirectConfirmBtn').addEventListener('click', async () => {
     const note = document.getElementById('redirectNote');
     const amount = +document.getElementById('redirectAmount').value || 0;
     if(amount <= 0){ flashNote(note, 'Enter an amount.', true); return; }
-    if(amount > source.getMonthly()){ flashNote(note, 'Can\'t redirect more than the current ' + money(source.getMonthly()) + '/mo.', true); return; }
-    const dest = fundEntry(document.getElementById('redirectDest').value);
-    if(!dest) return;
-    source.setMonthly(source.getMonthly() - amount);
-    dest.setMonthly(dest.getMonthly() + amount);
+    if(amount > source.getMonthly()){ flashNote(note, 'Can\'t schedule more than the current ' + money(source.getMonthly()) + '/mo.', true); return; }
+    source.setScheduledRedirect({destKey: document.getElementById('redirectDest').value, amount});
     await source.persist();
-    await dest.persist();
     source.afterSave();
-    dest.afterSave();
-    renderDashboard();
     document.getElementById('modalOverlay').style.display = 'none';
     content.innerHTML = '';
   });
+  const cancelBtn = document.getElementById('redirectCancelBtn');
+  if(cancelBtn){
+    cancelBtn.addEventListener('click', async () => {
+      source.setScheduledRedirect(null);
+      await source.persist();
+      source.afterSave();
+      document.getElementById('modalOverlay').style.display = 'none';
+      content.innerHTML = '';
+    });
+  }
 }
 
 /* ---------- Edit popup ---------- */
@@ -1376,6 +1546,7 @@ async function startApp(){
   await initJapan();
   await initTargets();
   await initBudget();
+  await applyScheduledRedirects();
   renderDashboard();
   wireModal();
   enhanceNumberInputs(document);
