@@ -853,6 +853,8 @@ function buildAIPayload(){
 /* Pulls a {reasoning, allocations, redirect} plan out of the model's raw text reply, tolerating markdown fences around the JSON. Returns null if it isn't a usable plan. */
 function tryParseAIPlan(text){
   if(!text) return null;
+  if(typeof text === 'object') return Array.isArray(text.allocations) ? text : null;
+  if(typeof text !== 'string') return null;
   let cleaned = text.trim();
   const fence = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/i);
   if(fence) cleaned = fence[1].trim();
@@ -941,11 +943,19 @@ async function getAISuggestion(){
   btn.disabled = true;
   output.style.color = 'var(--text-dim)';
   output.textContent = 'Thinking…';
+  let res;
   try {
-    const res = await fetch(aiState.endpointUrl, {
+    res = await fetch(aiState.endpointUrl, {
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify(buildAIPayload())
     });
+  } catch(e) {
+    output.style.color = 'var(--coral)';
+    output.textContent = 'Couldn\'t reach the AI endpoint. Check the URL and try again.';
+    btn.disabled = false;
+    return;
+  }
+  try {
     const data = await res.json().catch(() => ({}));
     if(!res.ok || data.error){
       output.style.color = 'var(--coral)';
@@ -956,12 +966,12 @@ async function getAISuggestion(){
         renderAIPlan(plan);
       } else {
         output.style.color = 'var(--text)';
-        output.textContent = data.suggestion || 'No suggestion returned.';
+        output.textContent = (typeof data.suggestion === 'string' ? data.suggestion : JSON.stringify(data.suggestion)) || 'No suggestion returned.';
       }
     }
   } catch(e) {
     output.style.color = 'var(--coral)';
-    output.textContent = 'Couldn\'t reach the AI endpoint. Check the URL and try again.';
+    output.textContent = 'Got a reply but couldn\'t process it: ' + e.message;
   } finally {
     btn.disabled = false;
   }
