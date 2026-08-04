@@ -291,6 +291,20 @@
     </div>
   </div>
 
+  <!-- AI coach: sends budget + target numbers to a self-hosted endpoint, shows the reply -->
+  <div class="ledger-line">
+    <div class="line-head">
+      <div class="icon-badge"><svg viewBox="0 0 24 24"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg></div>
+      <div style="flex:1">
+        <p class="line-title">AI coach</p>
+        <p class="line-desc">Suggestions on how much to save, when, and where to redirect next.</p>
+      </div>
+      <button type="button" class="section-edit-btn" data-section="ai">Edit</button>
+    </div>
+    <button type="button" id="aiGetSuggestionBtn" style="width:100%;margin-bottom:12px;">Get suggestions</button>
+    <div class="log-caption" id="aiOutput" style="white-space:pre-wrap;font-size:13px;line-height:1.6;"></div>
+  </div>
+
   <!-- DASHBOARD -->
   <div class="dashboard" id="dashboardGrid">
     <div class="dash-card">
@@ -435,6 +449,14 @@
       </div>
       <div class="row"><button id="saveBudget" style="flex:1 1 100%;">Update</button></div>
       <div class="save-note" id="budgetNote"></div>
+    </div>
+
+    <div id="section-ai">
+      <div class="modal-head"><div class="icon-badge"><svg viewBox="0 0 24 24"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg></div><p class="line-title">AI coach</p></div>
+      <div class="row"><div class="field-group"><label class="field">AI endpoint URL</label><input type="text" id="aiEndpointUrl" placeholder="https://your-worker.workers.dev"></div></div>
+      <p class="line-desc" style="margin-top:10px;">Your budget and target numbers are sent to this endpoint only when you tap "Get suggestions" — nothing goes out automatically.</p>
+      <div class="row"><button id="saveAI" style="flex:1 1 100%;">Update</button></div>
+      <div class="save-note" id="aiNote"></div>
     </div>
 
     <div id="section-debt">
@@ -784,6 +806,79 @@ async function initBudget(){
     renderBudgetStats(); checkBudgetDirty();
     flashNote(document.getElementById('budgetNote'), 'Updated.');
   });
+}
+
+/* ---------- AI coach: sends a numbers-only snapshot to a self-hosted endpoint on request ---------- */
+let aiState = null;
+async function initAI(){
+  aiState = await loadJSON('ai-v1', {endpointUrl:''});
+  document.getElementById('aiEndpointUrl').value = aiState.endpointUrl || '';
+  const checkAIDirty = wireDirtyCheck(document.getElementById('saveAI'), ['aiEndpointUrl'], () => [aiState.endpointUrl||'']);
+  document.getElementById('saveAI').addEventListener('click', async () => {
+    aiState.endpointUrl = document.getElementById('aiEndpointUrl').value.trim();
+    await saveJSON('ai-v1', aiState);
+    checkAIDirty();
+    flashNote(document.getElementById('aiNote'), 'Updated.');
+  });
+  document.getElementById('aiGetSuggestionBtn').addEventListener('click', getAISuggestion);
+}
+function buildAIFundEntry(key, label, total, target, monthly){
+  const monthsLeft = monthsToGoalWithSchedule(total, target, monthly, incomingRedirects(key));
+  const f = fundEntry(key);
+  const sched = f && f.getScheduledRedirect && f.getScheduledRedirect();
+  const destF = sched ? fundEntry(sched.destKey) : null;
+  return {
+    name: label, total, target, monthly,
+    monthsLeft: (target>0 && isFinite(monthsLeft)) ? monthsLeft : null,
+    scheduled: (sched && destF) ? {amount: sched.amount, destLabel: destF.label} : null
+  };
+}
+function buildAIPayload(){
+  const actualBalance = actualDebtBalance(debtState);
+  const debtIncoming = incomingRedirects('debt');
+  const debtMonthsRaw = debtIncoming.length ? simulateDebtWithSchedule(actualBalance, debtState.ratePct, debtState.emi, debtState.extra, debtIncoming) : simulateDebt(actualBalance, debtState.ratePct, debtState.emi, debtState.extra).months;
+  const targets = [
+    buildAIFundEntry('emergency', 'Emergency fund', emergencyState.current+logsSum(emergencyState.logs), emergencyState.target||0, emergencyState.monthly||0),
+    buildAIFundEntry('japan', 'Japan trip fund', japanState.saved+logsSum(japanState.logs), japanState.target||0, japanState.monthly||0)
+  ];
+  (targetsState||[]).forEach(t => targets.push(buildAIFundEntry('target:'+t.id, t.name, (t.saved||0)+logsSum(t.logs), t.target||0, t.monthly||0)));
+  return {
+    salary: budgetState.salary||0, rent: budgetState.rent||0, fixedExpenses: budgetState.fixedExpenses||0,
+    remaining: monthlyBudget() - committedTotal(),
+    debt: {balance: actualBalance, ratePct: debtState.ratePct||0, emi: debtState.emi||0, extra: debtState.extra||0, monthsLeft: actualBalance && isFinite(debtMonthsRaw) ? debtMonthsRaw : null},
+    targets
+  };
+}
+async function getAISuggestion(){
+  const btn = document.getElementById('aiGetSuggestionBtn');
+  const output = document.getElementById('aiOutput');
+  if(!aiState.endpointUrl){
+    output.style.color = 'var(--coral)';
+    output.textContent = 'Set an AI endpoint first — tap Edit above.';
+    return;
+  }
+  btn.disabled = true;
+  output.style.color = 'var(--text-dim)';
+  output.textContent = 'Thinking…';
+  try {
+    const res = await fetch(aiState.endpointUrl, {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(buildAIPayload())
+    });
+    const data = await res.json().catch(() => ({}));
+    if(!res.ok || data.error){
+      output.style.color = 'var(--coral)';
+      output.textContent = 'Couldn\'t get a suggestion: ' + (data.error || res.status);
+    } else {
+      output.style.color = 'var(--text)';
+      output.textContent = data.suggestion || 'No suggestion returned.';
+    }
+  } catch(e) {
+    output.style.color = 'var(--coral)';
+    output.textContent = 'Couldn\'t reach the AI endpoint. Check the URL and try again.';
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 function renderDashboard(){
@@ -1626,6 +1721,7 @@ async function startApp(){
   await initJapan();
   await initTargets();
   await initBudget();
+  await initAI();
   await applyScheduledRedirects();
   renderDashboard();
   wireModal();
