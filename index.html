@@ -275,44 +275,6 @@
     </div>
   </div>
 
-  <!-- SIMULATOR -->
-  <div class="ledger-line" id="simulatorSection">
-    <div class="line-head">
-      <div class="icon-badge"><svg viewBox="0 0 24 24"><path d="M3 17l6-6 4 4 8-8"/><path d="M17 7h4v4"/></svg></div>
-      <div style="flex:1">
-        <p class="line-title">Simulator</p>
-        <p class="line-desc">What if your salary and rent change every year? A projection only — your real numbers stay untouched.</p>
-      </div>
-    </div>
-    <div class="row">
-      <div class="field-group"><label class="field">Annual raise %</label><input type="number" id="simRaisePct" placeholder="0" step="0.5"></div>
-      <div class="field-group"><label class="field">Annual rent growth %</label><input type="number" id="simRentGrowthPct" placeholder="0" step="0.5"></div>
-      <div class="field-group"><label class="field">Years</label><input type="number" id="simYears" placeholder="5" step="1"></div>
-    </div>
-    <div class="checkline" style="margin-top:16px;">
-      <input type="checkbox" id="simEscalate">
-      <span class="checktext">Also grow debt extra + target contributions with the raise</span>
-    </div>
-    <div class="row"><button id="saveSim" style="flex:1 1 100%;">Update simulation</button></div>
-    <div class="cal-summary">
-      <div class="stat"><div class="stat-label">Remaining today</div><div class="stat-val" id="simRemainingNow">—</div></div>
-      <div class="stat"><div class="stat-label" id="simRemainingLaterLabel">Remaining in 5 yrs</div><div class="stat-val green" id="simRemainingLater">—</div></div>
-    </div>
-    <div class="line-chart" id="simChart"></div>
-    <div class="log-block">
-      <div class="log-block-label">Debt payoff impact</div>
-      <div class="cal-summary">
-        <div class="stat"><div class="stat-label">Without raise</div><div class="stat-val" id="simDebtFlat">—</div></div>
-        <div class="stat"><div class="stat-label">With raise applied</div><div class="stat-val green" id="simDebtEscalated">—</div></div>
-        <div class="stat"><div class="stat-label">Difference</div><div class="stat-val coral" id="simDebtSaved">—</div></div>
-      </div>
-    </div>
-    <div class="log-block">
-      <div class="log-block-label">Target impact</div>
-      <div id="simTargetImpactList"></div>
-    </div>
-  </div>
-
   <!-- DASHBOARD -->
   <div class="dashboard" id="dashboardGrid">
     <div class="dash-card">
@@ -794,150 +756,7 @@ function renderDashboard(){
   renderBudgetStats();
   renderTargetDashCards();
   renderDebtChart();
-  renderSimulator();
   renderHistory();
-}
-
-/* ---------- Simulator: annual raise / rent-growth what-if, never touches saved data ---------- */
-let simState = null;
-async function initSimulator(){
-  simState = await loadJSON('simulator-v1', {raisePct:0, rentGrowthPct:0, escalate:false, years:5});
-  document.getElementById('simRaisePct').value = simState.raisePct || '';
-  document.getElementById('simRentGrowthPct').value = simState.rentGrowthPct || '';
-  document.getElementById('simYears').value = simState.years || 5;
-  document.getElementById('simEscalate').checked = !!simState.escalate;
-  renderSimulator();
-  const checkSimDirty = wireDirtyCheck(document.getElementById('saveSim'),
-    ['simRaisePct','simRentGrowthPct','simYears'],
-    () => [simState.raisePct||'', simState.rentGrowthPct||'', simState.years||5]);
-  document.getElementById('simEscalate').addEventListener('change', () => { document.getElementById('saveSim').disabled = false; });
-  document.getElementById('saveSim').addEventListener('click', async () => {
-    simState.raisePct = +document.getElementById('simRaisePct').value || 0;
-    simState.rentGrowthPct = +document.getElementById('simRentGrowthPct').value || 0;
-    simState.years = Math.max(1, +document.getElementById('simYears').value || 5);
-    simState.escalate = document.getElementById('simEscalate').checked;
-    await saveJSON('simulator-v1', simState);
-    renderSimulator();
-    checkSimDirty();
-  });
-}
-function computeYearlyProjection(){
-  const years = simState.years || 5;
-  const salary0 = budgetState.salary||0;
-  const rent0 = budgetState.rent||0;
-  const fixed = budgetState.fixedExpenses||0;
-  const emi = debtState.emi||0;
-  const baseCommitted = committedTotal();
-  const raise = (simState.raisePct||0)/100;
-  const rentGrowth = (simState.rentGrowthPct||0)/100;
-  const rows = [];
-  for(let y=0;y<=years;y++){
-    const salary = salary0*Math.pow(1+raise, y);
-    const rent = rent0*Math.pow(1+rentGrowth, y);
-    const committed = simState.escalate ? baseCommitted*Math.pow(1+raise, y) : baseCommitted;
-    const remaining = salary - rent - fixed - emi - committed;
-    rows.push({year:y, salary, rent, committed, remaining});
-  }
-  return rows;
-}
-function simulateDebtEscalated(principal, ratePct, emi, extra, raisePct){
-  const r = (ratePct||0)/1200;
-  let balance=principal, months=0, curExtra=extra;
-  while(balance>1 && months<1200){
-    if(months>0 && months%12===0){ curExtra = curExtra*(1+(raisePct||0)/100); }
-    const interest = balance*r;
-    const reduction = (emi-interest)+curExtra;
-    if(reduction<=0) break;
-    balance = Math.max(0, balance-Math.min(reduction,balance));
-    months++;
-  }
-  return months;
-}
-function monthsToGoalEscalated(current, target, monthly, raisePct){
-  if(target<=0) return null;
-  if(current>=target) return 0;
-  if(monthly<=0) return Infinity;
-  let bal=current, months=0, curMonthly=monthly;
-  while(bal<target && months<1200){
-    if(months>0 && months%12===0){ curMonthly = curMonthly*(1+(raisePct||0)/100); }
-    bal += curMonthly;
-    months++;
-  }
-  return months>=1200 ? Infinity : months;
-}
-function renderSimChart(rows){
-  const host = document.getElementById('simChart');
-  const values = rows.map(r=>r.remaining);
-  const w=300,h=100,padL=6,padT=22,padB=16;
-  const innerW=w-padL*2, innerH=h-padT-padB;
-  const maxRef = Math.max(...values, 1);
-  const minRef = Math.min(0, ...values);
-  const range = (maxRef-minRef)||1;
-  const stepX = values.length>1 ? innerW/(values.length-1) : 0;
-  const coords = values.map((v,i) => {
-    const x = padL+i*stepX;
-    const frac = (v-minRef)/range;
-    const y = padT+(1-frac)*innerH;
-    return {x,y,val:v};
-  });
-  const pathD = coords.map((c,i)=> (i===0?'M':'L')+c.x.toFixed(1)+','+c.y.toFixed(1)).join(' ');
-  const baseline = (padT+innerH).toFixed(1);
-  const areaD = pathD + ' L'+coords[coords.length-1].x.toFixed(1)+','+baseline+' L'+coords[0].x.toFixed(1)+','+baseline+' Z';
-  const dots = coords.map((c,i)=>'<circle cx="'+c.x.toFixed(1)+'" cy="'+c.y.toFixed(1)+'" r="3" fill="'+(i===coords.length-1?'#1EE0A0':'#0D1220')+'" stroke="'+(i===coords.length-1?'#1EE0A0':'#22D3EE')+'" stroke-width="2"/>').join('');
-  const firstLabel = '<text x="'+coords[0].x.toFixed(1)+'" y="'+(coords[0].y-8).toFixed(1)+'" font-size="8.5" fill="#A3ADC2" text-anchor="start" font-family="JetBrains Mono, monospace">'+money(coords[0].val)+'</text>';
-  const lastC = coords[coords.length-1];
-  const lastLabel = '<text x="'+lastC.x.toFixed(1)+'" y="'+(lastC.y-8).toFixed(1)+'" font-size="8.5" fill="#F1F5F9" font-weight="600" text-anchor="end" font-family="JetBrains Mono, monospace">'+money(lastC.val)+'</text>';
-  const yearLabels = coords.map((c,i) => {
-    if(i!==0 && i!==coords.length-1) return '';
-    const lbl = i===0 ? 'Now' : ('Yr '+rows[i].year);
-    return '<text x="'+c.x.toFixed(1)+'" y="'+(h-2)+'" font-size="7.5" fill="#6B7690" text-anchor="'+(i===0?'start':'end')+'" font-family="JetBrains Mono, monospace">'+lbl+'</text>';
-  }).join('');
-  host.innerHTML =
-    '<svg viewBox="0 0 '+w+' '+h+'">'+
-    '<defs><linearGradient id="simAreaGrad" x1="0" y1="0" x2="0" y2="1">'+
-    '<stop offset="0%" stop-color="#1EE0A0" stop-opacity="0.28"/>'+
-    '<stop offset="100%" stop-color="#1EE0A0" stop-opacity="0"/>'+
-    '</linearGradient></defs>'+
-    '<path d="'+areaD+'" fill="url(#simAreaGrad)"/>'+
-    '<path d="'+pathD+'" fill="none" stroke="#1EE0A0" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>'+
-    dots + firstLabel + lastLabel + yearLabels +
-    '</svg>';
-}
-function renderSimulator(){
-  if(!simState || !budgetState || !debtState || !emergencyState || !japanState) return;
-  const rows = computeYearlyProjection();
-  document.getElementById('simRemainingNow').textContent = money(rows[0].remaining);
-  document.getElementById('simRemainingLaterLabel').textContent = 'Remaining in ' + (simState.years||5) + ' yrs';
-  const lastRow = rows[rows.length-1];
-  const laterEl = document.getElementById('simRemainingLater');
-  laterEl.textContent = money(lastRow.remaining);
-  laterEl.className = 'stat-val ' + (lastRow.remaining<0 ? 'coral' : 'green');
-  renderSimChart(rows);
-
-  const actualBalance = actualDebtBalance(debtState);
-  const flatMonths = simulateDebt(actualBalance, debtState.ratePct, debtState.emi, debtState.extra).months;
-  const escMonths = simulateDebtEscalated(actualBalance, debtState.ratePct, debtState.emi, debtState.extra, simState.raisePct);
-  document.getElementById('simDebtFlat').textContent = actualBalance ? (flatMonths+' mo · '+addMonthsLabel(flatMonths)) : '—';
-  document.getElementById('simDebtEscalated').textContent = actualBalance ? (escMonths+' mo · '+addMonthsLabel(escMonths)) : '—';
-  document.getElementById('simDebtSaved').textContent = actualBalance ? (Math.max(0,flatMonths-escMonths)+' months saved') : '—';
-
-  const goals = [];
-  const emgTotal = emergencyState.current + logsSum(emergencyState.logs);
-  if(emergencyState.target) goals.push({name:'Emergency fund', flat: monthsToGoal(emgTotal, emergencyState.target, emergencyState.monthly), esc: monthsToGoalEscalated(emgTotal, emergencyState.target, emergencyState.monthly, simState.raisePct)});
-  const japanTotal = japanState.saved + logsSum(japanState.logs);
-  if(japanState.target) goals.push({name:'Japan trip', flat: monthsToGoal(japanTotal, japanState.target, japanState.monthly), esc: monthsToGoalEscalated(japanTotal, japanState.target, japanState.monthly, simState.raisePct)});
-  (targetsState||[]).forEach(t => {
-    if(!t.target) return;
-    const total = (t.saved||0)+logsSum(t.logs);
-    goals.push({name:t.name, flat: monthsToGoal(total, t.target, t.monthly), esc: monthsToGoalEscalated(total, t.target, t.monthly, simState.raisePct)});
-  });
-  const listHost = document.getElementById('simTargetImpactList');
-  const rowsHtml = goals.map(g => {
-    const flatTxt = g.flat===null ? '—' : (isFinite(g.flat) ? (g.flat+' mo') : 'never');
-    const escTxt = g.esc===null ? '—' : (isFinite(g.esc) ? (g.esc+' mo') : 'never');
-    return '<div class="log-row"><span>'+escapeHtml(g.name)+'</span><span class="log-amt">'+flatTxt+' → '+escTxt+'</span></div>';
-  }).join('');
-  listHost.innerHTML = rowsHtml || '<div class="log-caption">Set targets above to see the impact here.</div>';
 }
 
 function renderDebtChart(){
@@ -1462,7 +1281,6 @@ async function startApp(){
   await initJapan();
   await initTargets();
   await initBudget();
-  await initSimulator();
   renderDashboard();
   wireModal();
   enhanceNumberInputs(document);
