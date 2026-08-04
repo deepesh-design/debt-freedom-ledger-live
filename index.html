@@ -828,7 +828,7 @@ function buildAIFundEntry(key, label, total, target, monthly){
   const sched = f && f.getScheduledRedirect && f.getScheduledRedirect();
   const destF = sched ? fundEntry(sched.destKey) : null;
   return {
-    name: label, total, target, monthly,
+    key, name: label, total, target, monthly,
     monthsLeft: (target>0 && isFinite(monthsLeft)) ? monthsLeft : null,
     scheduled: (sched && destF) ? {amount: sched.amount, destLabel: destF.label} : null
   };
@@ -846,8 +846,89 @@ function buildAIPayload(){
     salary: budgetState.salary||0, rent: budgetState.rent||0, fixedExpenses: budgetState.fixedExpenses||0,
     remaining: monthlyBudget() - committedTotal(),
     debt: {balance: actualBalance, ratePct: debtState.ratePct||0, emi: debtState.emi||0, extra: debtState.extra||0, monthsLeft: actualBalance && isFinite(debtMonthsRaw) ? debtMonthsRaw : null},
+    pool: Math.max(0, monthlyBudget() - (debtState.extra||0)),
     targets
   };
+}
+/* Pulls a {reasoning, allocations, redirect} plan out of the model's raw text reply, tolerating markdown fences around the JSON. Returns null if it isn't a usable plan. */
+function tryParseAIPlan(text){
+  if(!text) return null;
+  let cleaned = text.trim();
+  const fence = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if(fence) cleaned = fence[1].trim();
+  const start = cleaned.indexOf('{');
+  const end = cleaned.lastIndexOf('}');
+  if(start === -1 || end === -1 || end < start) return null;
+  try {
+    const obj = JSON.parse(cleaned.slice(start, end+1));
+    if(!Array.isArray(obj.allocations)) return null;
+    return obj;
+  } catch(e){ return null; }
+}
+function renderAIPlan(plan){
+  const output = document.getElementById('aiOutput');
+  const rows = plan.allocations
+    .filter(a => a.key !== 'debt' && fundEntry(a.key))
+    .map(a => {
+      const f = fundEntry(a.key);
+      return '<div class="cal-row ai-alloc-row" data-key="'+escapeHtml(a.key)+'">'+
+        '<span class="cal-month">'+escapeHtml(f.label)+'</span>'+
+        '<span class="cal-target">was '+money(f.getMonthly())+'</span>'+
+        '<input type="number" class="cal-extra ai-alloc-amount" value="'+Math.max(0,+a.monthly||0)+'">'+
+        '<input type="checkbox" class="cal-check ai-alloc-check" checked>'+
+      '</div>';
+    }).join('');
+  const redirect = plan.redirect;
+  const redirectValid = redirect && redirect.from !== 'debt' && fundEntry(redirect.from) && fundEntry(redirect.to);
+  output.innerHTML =
+    '<div class="log-caption" style="color:var(--text);font-size:13px;margin-bottom:10px;">'+escapeHtml(plan.reasoning||'')+'</div>'+
+    (rows || '<div class="log-caption">No target changes suggested.</div>')+
+    '<div class="log-caption ai-alloc-total" style="margin-top:8px;"></div>'+
+    '<button type="button" id="aiApplyBtn" style="width:100%;margin-top:10px;">Apply checked changes</button>'+
+    '<div class="save-note" id="aiApplyNote"></div>'+
+    (redirectValid ? '<button type="button" id="aiRedirectBtn" class="section-redirect-btn" style="width:100%;margin-top:10px;">Set up redirect: '+escapeHtml(fundEntry(redirect.from).label)+' → '+escapeHtml(fundEntry(redirect.to).label)+'</button>' : '');
+
+  const pool = buildAIPayload().pool;
+  function updateTotal(){
+    const total = [...output.querySelectorAll('.ai-alloc-row')].reduce((s,row) => s + (row.querySelector('.ai-alloc-check').checked ? (+row.querySelector('.ai-alloc-amount').value||0) : 0), 0);
+    const totalEl = output.querySelector('.ai-alloc-total');
+    totalEl.textContent = 'Total: ' + money(total) + ' of ' + money(pool) + ' available';
+    totalEl.style.color = total > pool ? 'var(--coral)' : 'var(--text-dim)';
+  }
+  output.querySelectorAll('.ai-alloc-amount, .ai-alloc-check').forEach(el => el.addEventListener('input', updateTotal));
+  updateTotal();
+
+  document.getElementById('aiApplyBtn').addEventListener('click', async () => {
+    const note = document.getElementById('aiApplyNote');
+    const selections = [...output.querySelectorAll('.ai-alloc-row')]
+      .filter(row => row.querySelector('.ai-alloc-check').checked)
+      .map(row => ({key: row.dataset.key, monthly: Math.max(0, +row.querySelector('.ai-alloc-amount').value||0)}));
+    const total = selections.reduce((s,x)=>s+x.monthly, 0);
+    if(total > pool){ flashNote(note, 'Over budget by ' + money(total-pool) + '. Not applied.', true); return; }
+    await applyAIAllocations(selections);
+    flashNote(note, 'Applied.');
+  });
+  if(redirectValid){
+    document.getElementById('aiRedirectBtn').addEventListener('click', () => openRedirectModal(redirect.from));
+  }
+}
+async function applyAIAllocations(selections){
+  selections.forEach(sel => {
+    if(sel.key === 'emergency') emergencyState.monthly = sel.monthly;
+    else if(sel.key === 'japan') japanState.monthly = sel.monthly;
+    else if(sel.key.indexOf('target:')===0){
+      const t = (targetsState||[]).find(x=>x.id===sel.key.slice(7));
+      if(t) t.monthly = sel.monthly;
+    }
+  });
+  await saveJSON('emergency-v2', emergencyState);
+  await saveJSON('japan-v2', japanState);
+  await saveJSON('targets-v1', targetsState);
+  await applyScheduledRedirects();
+  renderEmergency(); calRenderEmergency && calRenderEmergency();
+  renderJapan(); calRenderJapan && calRenderJapan();
+  renderTargetDashCards(); renderTargetSections();
+  renderDashboard();
 }
 async function getAISuggestion(){
   const btn = document.getElementById('aiGetSuggestionBtn');
@@ -870,8 +951,13 @@ async function getAISuggestion(){
       output.style.color = 'var(--coral)';
       output.textContent = 'Couldn\'t get a suggestion: ' + (data.error || res.status);
     } else {
-      output.style.color = 'var(--text)';
-      output.textContent = data.suggestion || 'No suggestion returned.';
+      const plan = tryParseAIPlan(data.suggestion);
+      if(plan){
+        renderAIPlan(plan);
+      } else {
+        output.style.color = 'var(--text)';
+        output.textContent = data.suggestion || 'No suggestion returned.';
+      }
     }
   } catch(e) {
     output.style.color = 'var(--coral)';
