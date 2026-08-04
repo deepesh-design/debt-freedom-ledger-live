@@ -1,4 +1,4 @@
-const CACHE_NAME = 'debt-ledger-v2';
+const CACHE_NAME = 'debt-ledger-v3';
 const ASSETS = ['./', './index.html', './manifest.json', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', (event) => {
@@ -18,6 +18,10 @@ self.addEventListener('activate', (event) => {
 });
 
 self.addEventListener('fetch', (event) => {
+  const url = new URL(event.request.url);
+  const isAppShell = url.origin === self.location.origin && event.request.method === 'GET';
+  if (!isAppShell) return; // let the browser handle everything else directly — cross-origin API calls (like the AI endpoint) must never be intercepted or cached
+
   event.respondWith(
     fetch(event.request)
       .then((res) => {
