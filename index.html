@@ -216,6 +216,11 @@
     border:solid #06231A;border-width:0 2px 2px 0;transform:rotate(45deg);
   }
 
+  .cal-marker{
+    font-size:11px;font-family:'JetBrains Mono',monospace;color:var(--green);
+    background:var(--green-dim);border-radius:7px;padding:6px 8px;margin:4px 0;
+  }
+
   .checkline{display:flex;align-items:center;gap:12px;}
   .checkline input[type=checkbox]{
     appearance:none;width:22px;height:22px;border:1.5px solid var(--text-faint);
@@ -351,6 +356,7 @@
     </div>
     <div class="line-chart" id="debtBarChart"></div>
     <div class="warn" id="debtWarn"></div>
+    <div class="log-caption" id="debtIncomingNote" style="display:none"></div>
     <div class="log-block"><div class="log-block-label">Months to payoff</div><div id="calDebt"></div></div>
   </div>
 
@@ -370,6 +376,7 @@
     <div class="mini-track"><div class="mini-fill" id="emergencyFill" style="width:0%"></div></div>
     <div class="mini-caption"><span id="emergencyPct">0%</span><span id="emergencyEta">—</span></div>
     <div class="log-caption" id="emergencyScheduleNote" style="display:none"></div>
+    <div class="log-caption" id="emergencyIncomingNote" style="display:none"></div>
     <div class="log-block"><div class="log-block-label">Months to target</div><div id="calEmergency"></div></div>
   </div>
 
@@ -394,6 +401,7 @@
     <div class="mini-track"><div class="mini-fill" id="japanFill" style="width:0%"></div></div>
     <div class="mini-caption"><span id="japanPct">0%</span></div>
     <div class="log-caption" id="japanScheduleNote" style="display:none"></div>
+    <div class="log-caption" id="japanIncomingNote" style="display:none"></div>
     <div class="log-block"><div class="log-block-label">Months to target</div><div id="calJapan"></div></div>
   </div>
 
@@ -573,25 +581,27 @@ function simulateDebt(principal, ratePct, emi, extra){
   }
   return {months, warn};
 }
-/* Same as monthsToGoal, but the monthly contribution steps up by `boost` starting at `boostFromMonth` — used to preview a scheduled redirect landing partway through. */
-function monthsToGoalWithBoost(current, target, monthlyBase, boost, boostFromMonth){
+/* Same as monthsToGoal, but the contribution steps up by each boost's amount from its own start month — for scheduled redirects (possibly several) landing partway through. */
+function monthsToGoalWithSchedule(current, target, monthlyBase, boosts){
   if(target <= 0) return null;
   if(current >= target) return 0;
+  if(!boosts || !boosts.length) return monthsToGoal(current, target, monthlyBase);
   let bal = current, months = 0;
   while(bal < target && months < 1200){
-    const contrib = months >= boostFromMonth ? monthlyBase+boost : monthlyBase;
+    const contrib = monthlyBase + boosts.reduce((s,b)=> s + (isFinite(b.fromMonth) && months>=b.fromMonth ? b.amount : 0), 0);
     if(contrib <= 0) return Infinity;
     bal += contrib;
     months++;
   }
   return months >= 1200 ? Infinity : months;
 }
-/* Same as simulateDebt, but extra payment steps up by `boost` starting at `boostFromMonth`. */
-function simulateDebtWithBoost(principal, ratePct, emi, extra, boost, boostFromMonth){
+/* Same as simulateDebt, but the extra payment steps up by each boost's amount from its own start month. */
+function simulateDebtWithSchedule(principal, ratePct, emi, extra, boosts){
+  if(!boosts || !boosts.length) return simulateDebt(principal, ratePct, emi, extra).months;
   const r = (ratePct||0)/1200;
   let balance = principal, months = 0;
   while(balance > 1 && months < 1200){
-    const curExtra = months >= boostFromMonth ? extra+boost : extra;
+    const curExtra = extra + boosts.reduce((s,b)=> s + (isFinite(b.fromMonth) && months>=b.fromMonth ? b.amount : 0), 0);
     const interest = balance*r;
     const reduction = (emi - interest) + curExtra;
     if(reduction <= 0) break;
@@ -782,19 +792,20 @@ function renderDashboard(){
   document.getElementById('dashCC').style.color = ccState.cleared ? 'var(--green)' : 'var(--text)';
 
   const actualBalance = actualDebtBalance(debtState);
-  const d = simulateDebt(actualBalance, debtState.ratePct, debtState.emi, debtState.extra);
+  const debtIncoming = incomingRedirects('debt');
+  const debtMonths = debtIncoming.length ? simulateDebtWithSchedule(actualBalance, debtState.ratePct, debtState.emi, debtState.extra, debtIncoming) : simulateDebt(actualBalance, debtState.ratePct, debtState.emi, debtState.extra).months;
   document.getElementById('dashDebtValue').textContent = money(actualBalance) + ' left';
-  document.getElementById('dashDebtFill').style.width = (actualBalance ? Math.min(100, Math.max(4,100-(d.months/240)*100)) : 0) + '%';
-  document.getElementById('dashDebtSub').textContent = actualBalance ? (d.months + ' mo remaining · payoff ' + addMonthsLabel(d.months)) : 'set details';
+  document.getElementById('dashDebtFill').style.width = (actualBalance ? Math.min(100, Math.max(4,100-(debtMonths/240)*100)) : 0) + '%';
+  document.getElementById('dashDebtSub').textContent = actualBalance ? (debtMonths + ' mo remaining · payoff ' + addMonthsLabel(debtMonths)) : 'set details';
 
   const emgTotal = emergencyState.current + logsSum(emergencyState.logs);
-  const eGoal = monthsToGoal(emgTotal, emergencyState.target, emergencyState.monthly);
+  const eGoal = monthsToGoalWithSchedule(emgTotal, emergencyState.target, emergencyState.monthly, incomingRedirects('emergency'));
   document.getElementById('dashEmergencyValue').textContent = money(emgTotal) + ' / ' + money(emergencyState.target);
   document.getElementById('dashEmergencyFill').style.width = Math.min(100, (emgTotal/(emergencyState.target||1))*100) + '%';
   document.getElementById('dashEmergencySub').textContent = emergencyState.target ? (monthsRemainingLabel(eGoal) + ' · reach ' + addMonthsLabel(eGoal)) : 'set details';
 
   const japanTotal = japanState.saved + logsSum(japanState.logs);
-  const jGoal = monthsToGoal(japanTotal, japanState.target, japanState.monthly);
+  const jGoal = monthsToGoalWithSchedule(japanTotal, japanState.target, japanState.monthly, incomingRedirects('japan'));
   document.getElementById('dashJapanValue').textContent = money(japanTotal) + ' / ' + money(japanState.target);
   document.getElementById('dashJapanFill').style.width = Math.min(100, (japanTotal/(japanState.target||1))*100) + '%';
   document.getElementById('dashJapanSub').textContent = japanState.target ? (monthsRemainingLabel(jGoal) + ' · reach ' + addMonthsLabel(jGoal)) : 'set details';
@@ -851,7 +862,9 @@ function buildMonthCalendar(container, opts){
   function render(){
     const state = opts.getState();
     if(!state){ container.innerHTML=''; return; }
-    const targetAmt = opts.targetAmount(state);
+    const baseTarget = opts.targetAmount(state);
+    const boosts = opts.incomingRedirects ? opts.incomingRedirects() : [];
+    const targetAmtAt = (i) => baseTarget + boosts.reduce((s,b)=> s + (isFinite(b.fromMonth) && i>=b.fromMonth ? b.amount : 0), 0);
     const logs = state[opts.logsKey] || [];
     const logMap = {}; logs.forEach(l => logMap[l.month] = l);
     const monthsCount = Math.max(0, Math.min(36, opts.monthsCount(state)));
@@ -864,8 +877,9 @@ function buildMonthCalendar(container, opts){
     let start, end;
     if(expanded){
       const idxs = logs.map(l => monthKeyToIndex(l.month));
+      const boostIdxs = boosts.map(b=>b.fromMonth).filter(isFinite);
       start = Math.min(-1, ...(idxs.length ? idxs : [-1]));
-      end = Math.max(monthsCount, 2, ...(idxs.length ? idxs.map(i=>i+1) : [2]));
+      end = Math.max(monthsCount, 2, ...(idxs.length ? idxs.map(i=>i+1) : [2]), ...(boostIdxs.length ? boostIdxs.map(i=>i+1) : [0]));
     } else {
       start = -1; end = 2;
     }
@@ -873,11 +887,20 @@ function buildMonthCalendar(container, opts){
     container.innerHTML = '';
     for(let i=start;i<end;i++){
       const key = monthKeyAt(i);
+      const startingHere = boosts.filter(b => b.fromMonth === i);
+      if(startingHere.length){
+        const marker = document.createElement('div');
+        marker.className = 'cal-marker';
+        marker.textContent = '↓ ' + startingHere.map(b => '+'+money(b.amount)+'/mo from '+b.sourceLabel).join(', ') + ' starts here';
+        container.appendChild(marker);
+      }
+      const targetAmt = targetAmtAt(i);
       const entry = logMap[key];
       const checked = entry !== undefined;
       const extra = checked ? (entry.amount-targetAmt) : 0;
       const row = document.createElement('div');
       row.className = 'cal-row' + (checked ? (extra<0 ? ' short' : ' paid') : '');
+      row.dataset.targetAmt = targetAmt;
       row.innerHTML =
         '<span class="cal-month">'+monthKeyLabel(key)+'</span>'+
         '<span class="cal-target">'+money(targetAmt)+'</span>'+
@@ -900,7 +923,7 @@ function buildMonthCalendar(container, opts){
         const row = cb.closest('.cal-row');
         const extraVal = +row.querySelector('.cal-extra').value || 0;
         state[opts.logsKey] = (state[opts.logsKey]||[]).filter(l=>l.month!==month);
-        if(cb.checked){ state[opts.logsKey].push({month, amount: targetAmt+extraVal, loggedAt: Date.now()}); }
+        if(cb.checked){ state[opts.logsKey].push({month, amount: (+row.dataset.targetAmt)+extraVal, loggedAt: Date.now()}); }
         await opts.save(state);
         opts.onChange && opts.onChange();
         await applyScheduledRedirects();
@@ -916,7 +939,7 @@ function buildMonthCalendar(container, opts){
         if(!row.querySelector('.cal-check').checked) return;
         const extraVal = +inp.value || 0;
         state[opts.logsKey] = (state[opts.logsKey]||[]).filter(l=>l.month!==month);
-        state[opts.logsKey].push({month, amount: targetAmt+extraVal, loggedAt: Date.now()});
+        state[opts.logsKey].push({month, amount: (+row.dataset.targetAmt)+extraVal, loggedAt: Date.now()});
         await opts.save(state);
         opts.onChange && opts.onChange();
         await applyScheduledRedirects();
@@ -999,8 +1022,9 @@ async function initDebt(){
   renderDebt();
   calRenderDebt = buildMonthCalendar(document.getElementById('calDebt'), {
     getState: () => debtState, save: (s)=>saveJSON('debt-v2', s), logsKey: 'logs',
-    monthsCount: (s) => { const bal = actualDebtBalance(s); return (bal && s.emi) ? simulateDebt(bal, s.ratePct, s.emi, s.extra).months : 0; },
+    monthsCount: (s) => { const bal = actualDebtBalance(s); return (bal && s.emi) ? simulateDebtWithSchedule(bal, s.ratePct, s.emi, s.extra, incomingRedirects('debt')) : 0; },
     targetAmount: (s) => (s.emi||0) + (s.extra||0),
+    incomingRedirects: () => incomingRedirects('debt'),
     onChange: renderDebt
   });
   checkDebtDirty = wireDirtyCheck(document.getElementById('saveDebt'),
@@ -1025,13 +1049,16 @@ async function initDebt(){
 }
 function renderDebt(){
   const actualBalance = actualDebtBalance(debtState);
-  const live = simulateDebt(actualBalance, debtState.ratePct, debtState.emi, debtState.extra);
+  const incoming = incomingRedirects('debt');
+  const liveMonths = incoming.length ? simulateDebtWithSchedule(actualBalance, debtState.ratePct, debtState.emi, debtState.extra, incoming) : simulateDebt(actualBalance, debtState.ratePct, debtState.emi, debtState.extra).months;
+  const liveWarn = simulateDebt(actualBalance, debtState.ratePct, debtState.emi, debtState.extra).warn;
   const base = simulateDebt(actualBalance, debtState.ratePct, debtState.emi, 0);
-  const monthsSaved = Math.max(0, base.months - live.months);
-  document.getElementById('debtMonthsLeft').textContent = actualBalance ? (live.months + ' mo') : '—';
-  document.getElementById('debtPayoffDate').textContent = actualBalance ? addMonthsLabel(live.months) : '—';
+  const monthsSaved = Math.max(0, base.months - liveMonths);
+  document.getElementById('debtMonthsLeft').textContent = actualBalance ? (liveMonths + ' mo') : '—';
+  document.getElementById('debtPayoffDate').textContent = actualBalance ? addMonthsLabel(liveMonths) : '—';
   document.getElementById('debtMonthsSaved').textContent = monthsSaved + ' months saved';
-  document.getElementById('debtWarn').textContent = live.warn ? 'This EMI barely covers interest — payoff will take a very long time.' : '';
+  document.getElementById('debtWarn').textContent = liveWarn ? 'This EMI barely covers interest — payoff will take a very long time.' : '';
+  renderIncomingNote('debtIncomingNote', 'debt');
   renderDebtChart();
   renderDashboard();
 }
@@ -1045,8 +1072,9 @@ async function initEmergency(){
   renderEmergency();
   calRenderEmergency = buildMonthCalendar(document.getElementById('calEmergency'), {
     getState: () => emergencyState, save: (s)=>saveJSON('emergency-v2', s), logsKey: 'logs',
-    monthsCount: (s) => monthsToGoal(s.current+logsSum(s.logs), s.target, s.monthly) ?? 0,
+    monthsCount: (s) => monthsToGoalWithSchedule(s.current+logsSum(s.logs), s.target, s.monthly, incomingRedirects('emergency')) ?? 0,
     targetAmount: (s) => s.monthly||0,
+    incomingRedirects: () => incomingRedirects('emergency'),
     onChange: renderEmergency
   });
   checkEmergencyDirty = wireDirtyCheck(document.getElementById('saveEmergency'),
@@ -1074,10 +1102,11 @@ function renderEmergency(){
   const pct = Math.min(100, (total/(emergencyState.target||1))*100);
   document.getElementById('emergencyFill').style.width = pct + '%';
   document.getElementById('emergencyPct').textContent = Math.round(pct) + '% of ' + money(emergencyState.target);
-  const goal = monthsToGoal(total, emergencyState.target, emergencyState.monthly);
+  const goal = monthsToGoalWithSchedule(total, emergencyState.target, emergencyState.monthly, incomingRedirects('emergency'));
   document.getElementById('emergencyEta').textContent = emergencyState.target ? ('reach by ' + addMonthsLabel(goal)) : 'set a target above';
   document.getElementById('emergencyRedirectBtn').style.display = emergencyState.monthly>0 ? '' : 'none';
   renderScheduleNote('emergencyScheduleNote', emergencyState.scheduledRedirect);
+  renderIncomingNote('emergencyIncomingNote', 'emergency');
   renderDashboard();
 }
 
@@ -1091,8 +1120,9 @@ async function initJapan(){
   renderJapan();
   calRenderJapan = buildMonthCalendar(document.getElementById('calJapan'), {
     getState: () => japanState, save: (s)=>saveJSON('japan-v2', s), logsKey: 'logs',
-    monthsCount: (s) => monthsToGoal(s.saved+logsSum(s.logs), s.target, s.monthly) ?? 0,
+    monthsCount: (s) => monthsToGoalWithSchedule(s.saved+logsSum(s.logs), s.target, s.monthly, incomingRedirects('japan')) ?? 0,
     targetAmount: (s) => s.monthly||0,
+    incomingRedirects: () => incomingRedirects('japan'),
     onChange: renderJapan
   });
   checkJapanDirty = wireDirtyCheck(document.getElementById('saveJapan'),
@@ -1123,6 +1153,7 @@ function renderJapan(){
   document.getElementById('japanPct').textContent = Math.round(pct) + '% of ' + money(japanState.target);
   document.getElementById('japanRedirectBtn').style.display = japanState.monthly>0 ? '' : 'none';
   renderScheduleNote('japanScheduleNote', japanState.scheduledRedirect);
+  renderIncomingNote('japanIncomingNote', 'japan');
 
   if(!japanState.target){
     document.getElementById('japanRequired').textContent = '—';
@@ -1136,7 +1167,7 @@ function renderJapan(){
   const remaining = Math.max(0, japanState.target - total);
   const monthsToDate = monthsBetweenTodayAndDate(japanState.date);
   const requiredMonthly = monthsToDate ? remaining/monthsToDate : (remaining>0 ? Infinity : 0);
-  const projectedMonths = monthsToGoal(total, japanState.target, japanState.monthly);
+  const projectedMonths = monthsToGoalWithSchedule(total, japanState.target, japanState.monthly, incomingRedirects('japan'));
 
   document.getElementById('japanRequired').textContent = japanState.date ? (isFinite(requiredMonthly) ? money(requiredMonthly)+'/mo' : 'past due') : 'set a date above';
   document.getElementById('japanProjected').textContent = addMonthsLabel(projectedMonths);
@@ -1163,7 +1194,7 @@ function renderTargetDashCards(){
   grid.querySelectorAll('.dyn-target-card').forEach(el => el.remove());
   (targetsState||[]).forEach(t => {
     const total = (t.saved||0) + logsSum(t.logs);
-    const goal = monthsToGoal(total, t.target, t.monthly);
+    const goal = monthsToGoalWithSchedule(total, t.target, t.monthly, incomingRedirects('target:'+t.id));
     const pct = Math.min(100, (total/(t.target||1))*100);
     const card = document.createElement('div');
     card.className = 'dash-card dyn-target-card';
@@ -1183,7 +1214,9 @@ function renderTargetSections(){
   (targetsState||[]).forEach(t => {
     const total = (t.saved||0) + logsSum(t.logs);
     const pct = Math.min(100, (total/(t.target||1))*100);
-    const goal = monthsToGoal(total, t.target, t.monthly);
+    const incoming = incomingRedirects('target:'+t.id);
+    const goal = monthsToGoalWithSchedule(total, t.target, t.monthly, incoming);
+    const incomingText = incomingRedirectsNoteText('target:'+t.id);
     const section = document.createElement('div');
     section.className = 'ledger-line';
     section.innerHTML =
@@ -1198,6 +1231,7 @@ function renderTargetSections(){
       '<div class="mini-track"><div class="mini-fill" style="width:'+pct+'%"></div></div>'+
       '<div class="mini-caption"><span>'+Math.round(pct)+'% of '+money(t.target)+'</span><span>'+(t.target?('reach by '+addMonthsLabel(goal)):'set a target above')+'</span></div>'+
       (t.scheduledRedirect ? '<div class="log-caption">'+scheduleNoteText(t.scheduledRedirect)+'</div>' : '')+
+      (incomingText ? '<div class="log-caption">'+incomingText+'</div>' : '')+
       '<div class="log-block"><div class="log-block-label">Months to target</div><div class="target-cal"></div></div>';
     container.appendChild(section);
     const calContainer = section.querySelector('.target-cal');
@@ -1205,8 +1239,9 @@ function renderTargetSections(){
       getState: () => (targetsState||[]).find(x=>x.id===t.id),
       save: () => saveJSON('targets-v1', targetsState),
       logsKey: 'logs',
-      monthsCount: (s) => monthsToGoal((s.saved||0)+logsSum(s.logs), s.target, s.monthly) ?? 0,
+      monthsCount: (s) => monthsToGoalWithSchedule((s.saved||0)+logsSum(s.logs), s.target, s.monthly, incomingRedirects('target:'+t.id)) ?? 0,
       targetAmount: (s) => s.monthly||0,
+      incomingRedirects: () => incomingRedirects('target:'+t.id),
       onChange: () => { renderTargetDashCards(); renderTargetSectionSummary(t.id); }
     });
   });
@@ -1304,27 +1339,36 @@ function openAddTargetModal(){
 
 /* ---------- Redirect: schedule a monthly commitment to move to another fund once the source hits its target ---------- */
 function fundEntry(key){
-  if(key === 'emergency') return {
-    key, label: 'Emergency fund',
-    getMonthly: () => emergencyState.monthly||0, setMonthly: (v) => { emergencyState.monthly = v; },
-    getTotal: () => emergencyState.current + logsSum(emergencyState.logs), getTarget: () => emergencyState.target||0,
-    getScheduledRedirect: () => emergencyState.scheduledRedirect||null, setScheduledRedirect: (v) => { emergencyState.scheduledRedirect = v; },
-    persist: () => saveJSON('emergency-v2', emergencyState),
-    afterSave: () => { renderEmergency(); calRenderEmergency && calRenderEmergency(); }
-  };
-  if(key === 'japan') return {
-    key, label: 'Japan trip fund',
-    getMonthly: () => japanState.monthly||0, setMonthly: (v) => { japanState.monthly = v; },
-    getTotal: () => japanState.saved + logsSum(japanState.logs), getTarget: () => japanState.target||0,
-    getScheduledRedirect: () => japanState.scheduledRedirect||null, setScheduledRedirect: (v) => { japanState.scheduledRedirect = v; },
-    persist: () => saveJSON('japan-v2', japanState),
-    afterSave: () => { renderJapan(); calRenderJapan && calRenderJapan(); }
-  };
-  if(key === 'debt') return {
-    key, label: 'Debt (extra payment)', getMonthly: () => debtState.extra||0,
-    setMonthly: (v) => { debtState.extra = v; }, persist: () => saveJSON('debt-v2', debtState),
-    afterSave: () => { renderDebt(); calRenderDebt && calRenderDebt(); }
-  };
+  if(key === 'emergency'){
+    if(!emergencyState) return null;
+    return {
+      key, label: 'Emergency fund',
+      getMonthly: () => emergencyState.monthly||0, setMonthly: (v) => { emergencyState.monthly = v; },
+      getTotal: () => emergencyState.current + logsSum(emergencyState.logs), getTarget: () => emergencyState.target||0,
+      getScheduledRedirect: () => emergencyState.scheduledRedirect||null, setScheduledRedirect: (v) => { emergencyState.scheduledRedirect = v; },
+      persist: () => saveJSON('emergency-v2', emergencyState),
+      afterSave: () => { renderEmergency(); calRenderEmergency && calRenderEmergency(); }
+    };
+  }
+  if(key === 'japan'){
+    if(!japanState) return null;
+    return {
+      key, label: 'Japan trip fund',
+      getMonthly: () => japanState.monthly||0, setMonthly: (v) => { japanState.monthly = v; },
+      getTotal: () => japanState.saved + logsSum(japanState.logs), getTarget: () => japanState.target||0,
+      getScheduledRedirect: () => japanState.scheduledRedirect||null, setScheduledRedirect: (v) => { japanState.scheduledRedirect = v; },
+      persist: () => saveJSON('japan-v2', japanState),
+      afterSave: () => { renderJapan(); calRenderJapan && calRenderJapan(); }
+    };
+  }
+  if(key === 'debt'){
+    if(!debtState) return null;
+    return {
+      key, label: 'Debt (extra payment)', getMonthly: () => debtState.extra||0,
+      setMonthly: (v) => { debtState.extra = v; }, persist: () => saveJSON('debt-v2', debtState),
+      afterSave: () => { renderDebt(); calRenderDebt && calRenderDebt(); }
+    };
+  }
   if(key.indexOf('target:')===0){
     const id = key.slice(7);
     const t = (targetsState||[]).find(x=>x.id===id);
@@ -1359,15 +1403,40 @@ function renderScheduleNote(elId, sched){
   el.textContent = text;
   el.style.display = text ? '' : 'none';
 }
-/* Projected months for a fund (or debt payoff) if its monthly/extra amount steps up by `boost` starting month `boostFromMonth`. */
-function fundProjectionMonths(key, boost, boostFromMonth){
+/* Every scheduled redirect that lands on `destKey`, with the month (from now) each one kicks in. */
+function incomingRedirects(destKey){
+  const list = [];
+  redirectSourceKeys().forEach(key => {
+    const f = fundEntry(key);
+    const sched = f && f.getScheduledRedirect && f.getScheduledRedirect();
+    if(sched && sched.destKey === destKey){
+      list.push({amount: sched.amount, fromMonth: monthsToGoal(f.getTotal(), f.getTarget(), f.getMonthly()), sourceLabel: f.label, sourceKey: key});
+    }
+  });
+  return list;
+}
+function incomingRedirectsNoteText(destKey){
+  const list = incomingRedirects(destKey);
+  if(!list.length) return '';
+  return 'Incoming: ' + list.map(r => '+'+money(r.amount)+'/mo from '+escapeHtml(r.sourceLabel)+' once reached ('+(isFinite(r.fromMonth)?addMonthsLabel(r.fromMonth):'—')+')').join('; ') + '.';
+}
+function renderIncomingNote(elId, destKey){
+  const el = document.getElementById(elId);
+  if(!el) return;
+  const text = incomingRedirectsNoteText(destKey);
+  el.textContent = text;
+  el.style.display = text ? '' : 'none';
+}
+/* Projected months for a fund (or debt payoff), including any already-scheduled incoming redirects plus an optional hypothetical one being configured. */
+function fundProjectionMonths(key, hypotheticalBoosts){
+  const boosts = incomingRedirects(key).map(r => ({amount:r.amount, fromMonth:r.fromMonth})).concat(hypotheticalBoosts||[]);
   if(key === 'debt'){
     if(!debtState || !debtState.principal) return null;
-    return simulateDebtWithBoost(actualDebtBalance(debtState), debtState.ratePct, debtState.emi, debtState.extra||0, boost, boostFromMonth);
+    return simulateDebtWithSchedule(actualDebtBalance(debtState), debtState.ratePct, debtState.emi, debtState.extra||0, boosts);
   }
   const f = fundEntry(key);
   if(!f || !f.getTarget || !f.getTarget()) return null;
-  return monthsToGoalWithBoost(f.getTotal(), f.getTarget(), f.getMonthly(), boost, boostFromMonth);
+  return monthsToGoalWithSchedule(f.getTotal(), f.getTarget(), f.getMonthly(), boosts);
 }
 /* Checked after every save that could move a fund's total: applies any scheduled redirect whose source has now reached its target. */
 async function applyScheduledRedirects(){
@@ -1384,11 +1453,11 @@ async function applyScheduledRedirects(){
         f.setMonthly(f.getMonthly() - amt);
         dest.setMonthly(dest.getMonthly() + amt);
         await dest.persist();
-        dest.afterSave();
       }
       f.setScheduledRedirect(null);
       await f.persist();
       f.afterSave();
+      if(dest && amt > 0) dest.afterSave();
     }
   }
 }
@@ -1454,8 +1523,8 @@ function openRedirectModal(sourceKey){
     const destKey = document.getElementById('redirectDest').value;
     const dest = fundEntry(destKey);
     if(!dest || amount <= 0 || !isFinite(sourceMonths)){ preview.innerHTML = ''; return; }
-    const before = fundProjectionMonths(destKey, 0, 0);
-    const after = fundProjectionMonths(destKey, amount, sourceMonths);
+    const before = fundProjectionMonths(destKey, []);
+    const after = fundProjectionMonths(destKey, [{amount, fromMonth: sourceMonths}]);
     const label = (n) => n===null ? '—' : (isFinite(n) ? addMonthsLabel(n) : 'never at this pace');
     const savedMonths = (isFinite(before) && isFinite(after)) ? before-after : null;
     preview.innerHTML =
@@ -1488,9 +1557,16 @@ function openRedirectModal(sourceKey){
     const amount = +document.getElementById('redirectAmount').value || 0;
     if(amount <= 0){ flashNote(note, 'Enter an amount.', true); return; }
     if(amount > source.getMonthly()){ flashNote(note, 'Can\'t schedule more than the current ' + money(source.getMonthly()) + '/mo.', true); return; }
-    source.setScheduledRedirect({destKey: document.getElementById('redirectDest').value, amount});
+    const newDestKey = document.getElementById('redirectDest').value;
+    source.setScheduledRedirect({destKey: newDestKey, amount});
     await source.persist();
     source.afterSave();
+    const newDest = fundEntry(newDestKey);
+    newDest && newDest.afterSave();
+    if(existing && existing.destKey !== newDestKey){
+      const oldDest = fundEntry(existing.destKey);
+      oldDest && oldDest.afterSave();
+    }
     document.getElementById('modalOverlay').style.display = 'none';
     content.innerHTML = '';
   });
@@ -1500,6 +1576,10 @@ function openRedirectModal(sourceKey){
       source.setScheduledRedirect(null);
       await source.persist();
       source.afterSave();
+      if(existing){
+        const oldDest = fundEntry(existing.destKey);
+        oldDest && oldDest.afterSave();
+      }
       document.getElementById('modalOverlay').style.display = 'none';
       content.innerHTML = '';
     });
