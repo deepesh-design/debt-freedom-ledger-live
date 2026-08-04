@@ -1,4 +1,4 @@
-const CACHE_NAME = 'debt-ledger-v3';
+const CACHE_NAME = 'debt-ledger-v4';
 const ASSETS = ['./', './index.html', './manifest.json', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', (event) => {
@@ -23,7 +23,7 @@ self.addEventListener('fetch', (event) => {
   if (!isAppShell) return; // let the browser handle everything else directly — cross-origin API calls (like the AI endpoint) must never be intercepted or cached
 
   event.respondWith(
-    fetch(event.request)
+    fetch(new Request(event.request, { cache: 'reload' })) // bypass the browser's own HTTP cache, not just this SW's cache — otherwise a fresh deploy can stay invisible until that cache entry expires on its own
       .then((res) => {
         const copy = res.clone();
         caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
